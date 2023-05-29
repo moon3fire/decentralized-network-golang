@@ -13,10 +13,10 @@ import (
 var key = []byte("x52dmid220NYDo2kd29")
 
 const (
-	KeySize         = 16  // Size of the node ID in bytes
-	BucketSize      = 20  // Maximum number of nodes in a bucket
-	ReplicationSize = 10  // Number of nodes to replicate data to
-	K               = 10  // Number of closest nodes to consider
+	KeySize         = 16  
+	BucketSize      = 20  
+	ReplicationSize = 10  
+	K               = 10  
 )
 
 type NodeID [KeySize]byte
@@ -46,8 +46,6 @@ type Node struct {
 	}
 
 
-
-	// input format should be like ./main :8080
 	func init() {
 		if len(os.Args) != 2 {
 			panic("len args != 2")
@@ -108,7 +106,6 @@ func handleConnection(node *Node, conn net.Conn) {
         }
         message += string(buffer[:length])
     }
-    // decrypt the data using Verman cipher
     err := json.Unmarshal([]byte(message), &pack)
     if err != nil {
         return
@@ -164,19 +161,16 @@ func (node *Node) SendMessageToAll(message string) {
 }
 
 func (node *Node) Send(pack *Package) {
-    // create a new package
     newPack := Package{
         To: pack.To,
         From: pack.From,
         Data: pack.Data,
     }
-    // encrypt the data using Verman cipher
     encryptedData := make([]byte, len(newPack.Data))
     for i := 0; i < len(newPack.Data); i++ {
         encryptedData[i] = newPack.Data[i] ^ key[i % len(key)]
     }
     newPack.Data = string(encryptedData)
-    // send the encrypted package
     conn, err := net.Dial("tcp", newPack.To)
     if err != nil {
         delete(node.Connections, newPack.To)
@@ -211,10 +205,8 @@ func (node *Node) pingNode(address string) {
 }
 
 func (node *Node) RouteMessage(pack *Package) {
-	// Find the K closest nodes to the target ID
 	closestNodes := node.RoutingTable.FindClosestNodes(node.ID)
 
-	// Forward the message to the K closest nodes
 	for _, closestNode := range closestNodes {
 		pack.To = closestNode.Address.IPv4 + closestNode.Address.Port
 		node.Send(pack)
@@ -247,25 +239,20 @@ func (table *RoutingTable) FindClosestNodes(target NodeID) []*Node {
 	var closestNodes []*Node
 	bucketIndex := table.getBucketIndex(target)
 
-	// Append nodes from the target bucket
 	closestNodes = append(closestNodes, table.Buckets[bucketIndex]...)
 
-	// Sort the nodes in the target bucket by distance to the target ID
 	sort.SliceStable(closestNodes, func(i, j int) bool {
 		return compareNodeDistance(target, closestNodes[i].ID, closestNodes[j].ID)
 	})
 
-	// Check if there are more closest nodes in other buckets
 	remainingNodes := K - len(closestNodes)
 	if remainingNodes > 0 {
-		// Iterate over the remaining buckets
 		for i := bucketIndex + 1; i < len(table.Buckets) && remainingNodes > 0; i++ {
 			closestNodes = append(closestNodes, table.Buckets[i]...)
 			remainingNodes -= len(table.Buckets[i])
 		}
 	}
 
-	// Return the K closest nodes
 	if len(closestNodes) > K {
 		closestNodes = closestNodes[:K]
 	}
@@ -274,14 +261,11 @@ func (table *RoutingTable) FindClosestNodes(target NodeID) []*Node {
 }
 
 func (table *RoutingTable) getBucketIndex(target NodeID) int {
-	// Calculate the distance (XOR) between the target ID and the node ID for bucket indexing
 
-	// Check if the bucket is empty
 	if len(table.Buckets[0]) == 0 {
 		return 0
 	}
 
-	// Convert the distance to the corresponding bucket index
 	bucketIndex := KeySize*8 - 1 - commonPrefixLen(table.Buckets[0][0].ID[:], target[:])
 
 	if bucketIndex < 0 {
