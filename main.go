@@ -5,50 +5,72 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"os"
 	"strings"
 )
 
-var key = []byte("my_own_key") 
+var key = []byte("x52dmid220NYDo2kd29")
+
+const (
+	KeySize         = 16  // Size of the node ID in bytes
+	BucketSize      = 20  // Maximum number of nodes in a bucket
+	ReplicationSize = 10  // Number of nodes to replicate data to
+	K               = 10  // Number of closest nodes to consider
+)
+
+type NodeID [KeySize]byte
+
+type RoutingTable struct {
+	Buckets [KeySize * 8][]*Node
+}
 
 type Address struct {
 	IPv4 string
 	Port string
 }
 
+
 type Node struct {
-	Connections map[string]bool
-	Address     Address
+	ID           NodeID
+	Address      Address
+	Connections  map[string]bool
+	RoutingTable *RoutingTable
+	DataStore    map[string]string
 }
 
-type Package struct {
-	To   string
-	From string
-	Data string
-}
-
-// input format should be like ./main :8080
-func init() {
-	if len(os.Args) != 2 {
-		panic("len args != 2")
+	type Package struct {
+		To   string
+		From string
+		Data string
 	}
-}
 
-func main() {
-	NewNode(os.Args[1]).Run(handleServer, handleClient)
-}
 
-func NewNode(address string) *Node {
-	splited := strings.Split(address, ":")
-	if len(splited) != 2 {
-		return nil
+
+	// input format should be like ./main :8080
+	func init() {
+		if len(os.Args) != 2 {
+			panic("len args != 2")
+		}
 	}
-	return &Node{
-		Connections: make(map[string]bool),
-		Address: Address{
-			IPv4: splited[0],
-			Port: ":" + splited[1],
-		},
+
+	func main() {
+		NewNode(os.Args[1]).Run(handleServer, handleClient)
+	}
+
+	func NewNode(address string) *Node {
+		splited := strings.Split(address, ":")
+		if len(splited) != 2 {
+			return nil
+		}
+		var id NodeID
+		copy(id[:], []byte(splited[0]))
+		return &Node{
+		ID:			  id,
+		Address:      Address{IPv4: splited[0], Port: ":" + splited[1]},
+		Connections:  make(map[string]bool),
+		RoutingTable: NewRoutingTable(),
+		DataStore:    make(map[string]string),
 	}
 }
 
@@ -68,11 +90,11 @@ func handleServer(node *Node) {
 		if err != nil {
 			break
 		}
-		go handleConnection(node, conn, key)
+		go handleConnection(node, conn)
 	}
 }
 
-func handleConnection(node *Node, conn net.Conn, key []byte) {
+func handleConnection(node *Node, conn net.Conn) {
     defer conn.Close()
     var (
         buffer = make([]byte, 512)
@@ -137,11 +159,11 @@ func (node *Node) SendMessageToAll(message string) {
 	}
 	for addr := range node.Connections {
 		newPack.To = addr
-		node.Send(&newPack, key) 
+		node.Send(&newPack) 
 	}
 }
 
-func (node *Node) Send(pack *Package, key []byte) {
+func (node *Node) Send(pack *Package) {
     // create a new package
     newPack := Package{
         To: pack.To,
@@ -169,5 +191,125 @@ func (node *Node) Send(pack *Package, key []byte) {
 func InputString() string {
 	msg, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	return strings.Replace(msg, "\n", "", -1)
+}
+
+func (node *Node) pingNode(address string) {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		delete(node.Connections, address)
+		return
+	}
+	defer conn.Close()
+
+	pack := Package{
+		To:   address,
+		From: node.Address.IPv4 + node.Address.Port,
+	}
+
+	jsonPack, _ := json.Marshal(pack)
+	conn.Write(jsonPack)
+}
+
+func (node *Node) RouteMessage(pack *Package) {
+	// Find the K closest nodes to the target ID
+	closestNodes := node.RoutingTable.FindClosestNodes(node.ID)
+
+	// Forward the message to the K closest nodes
+	for _, closestNode := range closestNodes {
+		pack.To = closestNode.Address.IPv4 + closestNode.Address.Port
+		node.Send(pack)
+	}
+}
+
+func NewRoutingTable() *RoutingTable {
+	routingTable := &RoutingTable{}
+
+	for i := 0; i < KeySize*8; i++ {
+		routingTable.Buckets[i] = make([]*Node, 0)
+	}
+
+	return routingTable
+}
+
+func compareNodeDistance(target, a, b NodeID) bool {
+    distanceA := nodeDistance(target, a)
+    distanceB := nodeDistance(target, b)
+
+    for i := 0; i < KeySize; i++ {
+        if distanceA[i] != distanceB[i] {
+            return distanceA[i] < distanceB[i]
+        }
+    }
+    return false
+}
+
+func (table *RoutingTable) FindClosestNodes(target NodeID) []*Node {
+	var closestNodes []*Node
+	bucketIndex := table.getBucketIndex(target)
+
+	// Append nodes from the target bucket
+	closestNodes = append(closestNodes, table.Buckets[bucketIndex]...)
+
+	// Sort the nodes in the target bucket by distance to the target ID
+	sort.SliceStable(closestNodes, func(i, j int) bool {
+		return compareNodeDistance(target, closestNodes[i].ID, closestNodes[j].ID)
+	})
+
+	// Check if there are more closest nodes in other buckets
+	remainingNodes := K - len(closestNodes)
+	if remainingNodes > 0 {
+		// Iterate over the remaining buckets
+		for i := bucketIndex + 1; i < len(table.Buckets) && remainingNodes > 0; i++ {
+			closestNodes = append(closestNodes, table.Buckets[i]...)
+			remainingNodes -= len(table.Buckets[i])
+		}
+	}
+
+	// Return the K closest nodes
+	if len(closestNodes) > K {
+		closestNodes = closestNodes[:K]
+	}
+
+	return closestNodes
+}
+
+func (table *RoutingTable) getBucketIndex(target NodeID) int {
+	// Calculate the distance (XOR) between the target ID and the node ID for bucket indexing
+
+	// Check if the bucket is empty
+	if len(table.Buckets[0]) == 0 {
+		return 0
+	}
+
+	// Convert the distance to the corresponding bucket index
+	bucketIndex := KeySize*8 - 1 - commonPrefixLen(table.Buckets[0][0].ID[:], target[:])
+
+	if bucketIndex < 0 {
+		bucketIndex = 0
+	} else if bucketIndex >= len(table.Buckets) {
+		bucketIndex = len(table.Buckets) - 1
+	}
+
+	return bucketIndex
+}
+
+
+func nodeDistance(a, b NodeID) NodeID {
+	var distance NodeID
+	for i := 0; i < KeySize; i++ {
+		distance[i] = a[i] ^ b[i]
+	}
+	return distance
+}
+
+func commonPrefixLen(a, b []byte) int {
+	prefixLen := 0
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			break
+		}
+		prefixLen++
+	}
+	return prefixLen
 }
 
