@@ -5,18 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"sort"
 	"os"
 	"strings"
 )
 
-var key = []byte("x52dmid220NYDo2kd29")
+var key = []byte("C0z1IFc8BtDNeaOqSnVmMg9l3JxH5XZdR6vWp7b4YrLyGwuiKUfTsAj2kPQhE8BzrLMf2XaR")
 
 const (
-	KeySize         = 16  
-	BucketSize      = 20  
-	ReplicationSize = 10  
-	K               = 10  
+	KeySize         = 16
+	BucketSize      = 20
+	ReplicationSize = 10
+	K               = 10
 )
 
 type NodeID [KeySize]byte
@@ -30,7 +29,6 @@ type Address struct {
 	Port string
 }
 
-
 type Node struct {
 	ID           NodeID
 	Address      Address
@@ -39,32 +37,32 @@ type Node struct {
 	DataStore    map[string]string
 }
 
-	type Package struct {
-		To   string
-		From string
-		Data string
+type Package struct {
+	To        string
+	From      string
+	Data      string
+	Broadcast bool
+}
+
+func init() {
+	if len(os.Args) != 2 {
+		panic("len args != 2")
 	}
+}
 
+func main() {
+	NewNode(os.Args[1]).Run(handleServer, handleClient)
+}
 
-	func init() {
-		if len(os.Args) != 2 {
-			panic("len args != 2")
-		}
+func NewNode(address string) *Node {
+	splited := strings.Split(address, ":")
+	if len(splited) != 2 {
+		return nil
 	}
-
-	func main() {
-		NewNode(os.Args[1]).Run(handleServer, handleClient)
-	}
-
-	func NewNode(address string) *Node {
-		splited := strings.Split(address, ":")
-		if len(splited) != 2 {
-			return nil
-		}
-		var id NodeID
-		copy(id[:], []byte(splited[0]))
-		return &Node{
-		ID:			  id,
+	var id NodeID
+	copy(id[:], []byte(splited[0]))
+	return &Node{
+		ID:           id,
 		Address:      Address{IPv4: splited[0], Port: ":" + splited[1]},
 		Connections:  make(map[string]bool),
 		RoutingTable: NewRoutingTable(),
@@ -93,32 +91,34 @@ func handleServer(node *Node) {
 }
 
 func handleConnection(node *Node, conn net.Conn) {
-    defer conn.Close()
-    var (
-        buffer = make([]byte, 512)
-        message string
-        pack Package
-    )
-    for {
-        length, err := conn.Read(buffer)
-        if err != nil {
-            break
-        }
-        message += string(buffer[:length])
-    }
-    err := json.Unmarshal([]byte(message), &pack)
-    if err != nil {
-        return
-    }
-    decryptedData := make([]byte, len(pack.Data))
-    for i := 0; i < len(pack.Data); i++ {
-        decryptedData[i] = pack.Data[i] ^ key[i % len(key)]
-    }
-    pack.Data = string(decryptedData)
-    node.ConnectTo([]string{pack.From})
-    fmt.Println(pack.Data)
+	defer conn.Close()
+	var (
+		buffer  = make([]byte, 512)
+		message string
+		pack    Package
+	)
+	for {
+		length, err := conn.Read(buffer)
+		if err != nil {
+			break
+		}
+		message += string(buffer[:length])
+	}
+	err := json.Unmarshal([]byte(message), &pack)
+	if err != nil {
+		return
+	}
+	decryptedData := make([]byte, len(pack.Data))
+	for i := 0; i < len(pack.Data); i++ {
+		decryptedData[i] = pack.Data[i] ^ key[i%len(key)]
+	}
+	pack.Data = string(decryptedData)
+	node.ConnectTo([]string{pack.From})
+	fmt.Println(pack.Data)
+	if pack.Broadcast {
+		node.SendMessageToAll(pack.Data)
+	}
 }
-
 
 func handleClient(node *Node) {
 	for {
@@ -131,16 +131,52 @@ func handleClient(node *Node) {
 			node.ConnectTo(splited[1:])
 		case "/network":
 			node.PrintNetwork()
+		case "/ping":
+			node.Ping(splited[1])
 		default:
-			node.SendMessageToAll(message)
+			isBroadcast := AskForBroadcast()
+			if isBroadcast {
+				node.SendMessageToAll(message)
+			} else {
+				node.SendMessage(message, false) // changed to false
+			}
 		}
 	}
 }
 
-func (node *Node) PrintNetwork() {
-	for addr := range node.Connections {
-		fmt.Println(" | ", addr)
+func (node *Node) FindClosestNodes(target NodeID, count int) []*Node {
+	var result []*Node
+	bucketIndex := node.GetBucketIndex(target)
+	result = append(result, node.RoutingTable.Buckets[bucketIndex]...)
+	for i := bucketIndex - 1; i >= 0; i-- {
+		result = append(result, node.RoutingTable.Buckets[i]...)
+		if len(result) >= count {
+			break
+		}
 	}
+	for i := bucketIndex + 1; i < len(node.RoutingTable.Buckets); i++ {
+		result = append(result, node.RoutingTable.Buckets[i]...)
+		if len(result) >= count {
+			break
+		}
+	}
+	return result[:min(count, len(result))]
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (node *Node) GetBucketIndex(target NodeID) int {
+	for i := 0; i < KeySize*8; i++ {
+		if target[i/8]&(1<<(7-uint(i%8))) != node.ID[i/8]&(1<<(7-uint(i%8))) {
+			return i
+		}
+	}
+	return KeySize * 8
 }
 
 func (node *Node) ConnectTo(addresses []string) {
@@ -149,151 +185,82 @@ func (node *Node) ConnectTo(addresses []string) {
 	}
 }
 
-func (node *Node) SendMessageToAll(message string) {
-	var newPack = Package{
-		From: node.Address.IPv4 + node.Address.Port,
-		Data: message,
-	}
+func (node *Node) PrintNetwork() {
 	for addr := range node.Connections {
-		newPack.To = addr
-		node.Send(&newPack) 
-	}
-}
-
-func (node *Node) Send(pack *Package) {
-    newPack := Package{
-        To: pack.To,
-        From: pack.From,
-        Data: pack.Data,
-    }
-    encryptedData := make([]byte, len(newPack.Data))
-    for i := 0; i < len(newPack.Data); i++ {
-        encryptedData[i] = newPack.Data[i] ^ key[i % len(key)]
-    }
-    newPack.Data = string(encryptedData)
-    conn, err := net.Dial("tcp", newPack.To)
-    if err != nil {
-        delete(node.Connections, newPack.To)
-        return
-    }
-    defer conn.Close()
-    jsonPack, _ := json.Marshal(newPack)
-    conn.Write(jsonPack)
-}
-
-
-func InputString() string {
-	msg, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	return strings.Replace(msg, "\n", "", -1)
-}
-
-func (node *Node) pingNode(address string) {
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		delete(node.Connections, address)
-		return
-	}
-	defer conn.Close()
-
-	pack := Package{
-		To:   address,
-		From: node.Address.IPv4 + node.Address.Port,
-	}
-
-	jsonPack, _ := json.Marshal(pack)
-	conn.Write(jsonPack)
-}
-
-func (node *Node) RouteMessage(pack *Package) {
-	closestNodes := node.RoutingTable.FindClosestNodes(node.ID)
-
-	for _, closestNode := range closestNodes {
-		pack.To = closestNode.Address.IPv4 + closestNode.Address.Port
-		node.Send(pack)
+		fmt.Printf("Connected to: %s\n", addr)
 	}
 }
 
 func NewRoutingTable() *RoutingTable {
-	routingTable := &RoutingTable{}
-
-	for i := 0; i < KeySize*8; i++ {
+	var routingTable RoutingTable
+	for i := range routingTable.Buckets {
 		routingTable.Buckets[i] = make([]*Node, 0)
 	}
-
-	return routingTable
+	return &routingTable
 }
 
-func compareNodeDistance(target, a, b NodeID) bool {
-    distanceA := nodeDistance(target, a)
-    distanceB := nodeDistance(target, b)
-
-    for i := 0; i < KeySize; i++ {
-        if distanceA[i] != distanceB[i] {
-            return distanceA[i] < distanceB[i]
-        }
-    }
-    return false
+func (node *Node) SendMessageToAll(message string) {
+	node.SendMessage(message, true)
 }
 
-func (table *RoutingTable) FindClosestNodes(target NodeID) []*Node {
-	var closestNodes []*Node
-	bucketIndex := table.getBucketIndex(target)
+func (node *Node) SendMessage(message string, broadcast bool) {
+	var newPack = Package{
+		From:      node.Address.IPv4 + node.Address.Port,
+		Data:      message,
+		Broadcast: broadcast,
+	}
+	for addr := range node.Connections {
+		newPack.To = addr
+		node.Send(&newPack)
+	}
+}
 
-	closestNodes = append(closestNodes, table.Buckets[bucketIndex]...)
+func (node *Node) Send(pack *Package) {
+	newPack := Package{
+		To:        pack.To,
+		From:      pack.From,
+		Data:      pack.Data,
+		Broadcast: pack.Broadcast,
+	}
+	encryptedData := make([]byte, len(newPack.Data))
+	for i := 0; i < len(newPack.Data); i++ {
+		encryptedData[i] = newPack.Data[i] ^ key[i%len(key)]
+	}
+	newPack.Data = string(encryptedData)
+	conn, err := net.Dial("tcp", newPack.To)
+	if err != nil {
+		delete(node.Connections, newPack.To)
+		return
+	}
+	defer conn.Close()
+	jsonPack, _ := json.Marshal(newPack)
+	conn.Write(jsonPack)
+}
 
-	sort.SliceStable(closestNodes, func(i, j int) bool {
-		return compareNodeDistance(target, closestNodes[i].ID, closestNodes[j].ID)
+func (node *Node) Ping(address string) {
+	_, ok := node.Connections[address]
+	if ok {
+		fmt.Printf("You are already connected to %s\n", address)
+		return
+	}
+	node.Send(&Package{
+		To:        address,
+		From:      node.Address.IPv4 + node.Address.Port,
+		Data:      "PING " + node.Address.Port,
+		Broadcast: false,
 	})
-
-	remainingNodes := K - len(closestNodes)
-	if remainingNodes > 0 {
-		for i := bucketIndex + 1; i < len(table.Buckets) && remainingNodes > 0; i++ {
-			closestNodes = append(closestNodes, table.Buckets[i]...)
-			remainingNodes -= len(table.Buckets[i])
-		}
-	}
-
-	if len(closestNodes) > K {
-		closestNodes = closestNodes[:K]
-	}
-
-	return closestNodes
+	fmt.Println("Node " + address + " is available to connect with");
 }
 
-func (table *RoutingTable) getBucketIndex(target NodeID) int {
-
-	if len(table.Buckets[0]) == 0 {
-		return 0
-	}
-
-	bucketIndex := KeySize*8 - 1 - commonPrefixLen(table.Buckets[0][0].ID[:], target[:])
-
-	if bucketIndex < 0 {
-		bucketIndex = 0
-	} else if bucketIndex >= len(table.Buckets) {
-		bucketIndex = len(table.Buckets) - 1
-	}
-
-	return bucketIndex
+func InputString() string {
+	reader := bufio.NewReader(os.Stdin)
+	text, _ := reader.ReadString('\n')
+	return strings.TrimSpace(text)
 }
 
-
-func nodeDistance(a, b NodeID) NodeID {
-	var distance NodeID
-	for i := 0; i < KeySize; i++ {
-		distance[i] = a[i] ^ b[i]
-	}
-	return distance
-}
-
-func commonPrefixLen(a, b []byte) int {
-	prefixLen := 0
-	for i := 0; i < len(a) && i < len(b); i++ {
-		if a[i] != b[i] {
-			break
-		}
-		prefixLen++
-	}
-	return prefixLen
+func AskForBroadcast() bool {
+	fmt.Println("Is the message being broadcasted? (yes/no)")
+	answer := InputString()
+	return strings.ToLower(answer) == "yes"
 }
 
