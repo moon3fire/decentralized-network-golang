@@ -134,6 +134,11 @@ func handleClient(node *Node) {
 		case "/ping":
 			node.Ping(splited[1])
 		default:
+			if len(message) > 100 {
+				fmt.Println("Message lenght must be not larger than 100 symbols")
+				node.SendMessage("", false)
+				return
+			}
 			isBroadcast := AskForBroadcast()
 			if isBroadcast {
 				node.SendMessageToAll(message)
